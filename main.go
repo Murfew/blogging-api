@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -30,6 +33,20 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
+func validateRequestBody(w http.ResponseWriter, r *http.Request, post *Post) bool {
+	if err := json.NewDecoder(r.Body).Decode(&post); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
+		return false
+	}
+
+	if post.Title == "" || post.Content == "" || post.Category == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "title, content and category are required"})
+		return false
+	}
+
+	return true
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "ok")
@@ -37,13 +54,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (app *Application) handleCreatePost(w http.ResponseWriter, r *http.Request) {
 	var post Post
-	if err := json.NewDecoder(r.Body).Decode(&post); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
-		return
-	}
-
-	if post.Title == "" || post.Content == "" || post.Category == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "title, content and category are required"})
+	if !validateRequestBody(w, r, &post) {
 		return
 	}
 
@@ -55,6 +66,31 @@ func (app *Application) handleCreatePost(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusCreated, post)
+}
+
+func (app *Application) handleUpdatePost(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("id must be of type int: %v", err)})
+		return
+	}
+
+	var newPost Post
+	if !validateRequestBody(w, r, &newPost) {
+		return
+	}
+
+	query := "UPDATE posts SET title = $1, content = $2, category = $3, tags = $4, updated_at = $5 WHERE id = $6 RETURNING id, created_at, updated_at"
+	err = app.pool.QueryRow(context.Background(), query, newPost.Title, newPost.Content, newPost.Category, newPost.Tags, time.Now(), id).Scan(&newPost.ID, &newPost.CreatedAt, &newPost.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("failed to find post with id %d: %v", id, err)})
+		return
+	} else if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to update post (ID: %d): %v", id, err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, newPost)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -89,6 +125,7 @@ func main() {
 
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("POST /posts", app.handleCreatePost)
+	mux.HandleFunc("PUT /posts/{id}", app.handleUpdatePost)
 
 	fmt.Println("Server is running at http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
