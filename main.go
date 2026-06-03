@@ -47,9 +47,14 @@ func validateRequestBody(w http.ResponseWriter, r *http.Request, post *Post) boo
 	return true
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "ok")
+func validateIdPathParam(w http.ResponseWriter, r *http.Request, id *int) bool {
+	parsed, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("id must be of type int: %v", err)})
+		return false
+	}
+	*id = parsed
+	return true
 }
 
 func (app *Application) handleCreatePost(w http.ResponseWriter, r *http.Request) {
@@ -69,28 +74,43 @@ func (app *Application) handleCreatePost(w http.ResponseWriter, r *http.Request)
 }
 
 func (app *Application) handleUpdatePost(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("id must be of type int: %v", err)})
-		return
-	}
-
+	var id int
 	var newPost Post
-	if !validateRequestBody(w, r, &newPost) {
+	if !validateRequestBody(w, r, &newPost) || !validateIdPathParam(w, r, &id) {
 		return
 	}
 
 	query := "UPDATE posts SET title = $1, content = $2, category = $3, tags = $4, updated_at = $5 WHERE id = $6 RETURNING id, created_at, updated_at"
-	err = app.pool.QueryRow(context.Background(), query, newPost.Title, newPost.Content, newPost.Category, newPost.Tags, time.Now(), id).Scan(&newPost.ID, &newPost.CreatedAt, &newPost.UpdatedAt)
+	err := app.pool.QueryRow(context.Background(), query, newPost.Title, newPost.Content, newPost.Category, newPost.Tags, time.Now(), id).Scan(&newPost.ID, &newPost.CreatedAt, &newPost.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("failed to find post with id %d: %v", id, err)})
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("failed to find post with id %d", id)})
 		return
 	} else if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to update post (ID: %d): %v", id, err)})
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to update post (ID: %d)", id)})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, newPost)
+}
+
+func (app *Application) handleDeletePost(w http.ResponseWriter, r *http.Request) {
+	var id int
+	if !validateIdPathParam(w, r, &id) {
+		return
+	}
+
+	query := "DELETE FROM posts WHERE id = $1"
+	result, err := app.pool.Exec(context.Background(), query, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to delete post (ID: %d): %v", id, err)})
+		return
+	}
+
+	if result.RowsAffected() == 0 {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("failed to find post with id %d", id)})
+	}
+
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -123,9 +143,9 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("POST /posts", app.handleCreatePost)
 	mux.HandleFunc("PUT /posts/{id}", app.handleUpdatePost)
+	mux.HandleFunc("DELETE /posts/{id}", app.handleDeletePost)
 
 	fmt.Println("Server is running at http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
