@@ -160,8 +160,20 @@ func (app *Application) handleGetPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *Application) handleGetPosts(w http.ResponseWriter, r *http.Request) {
-	query := "SELECT * FROM posts"
-	rows, err := app.pool.Query(r.Context(), query)
+	term := r.URL.Query().Get("term")
+
+	var (
+		query string
+		args  []any
+	)
+	if term != "" {
+		query = "SELECT * FROM posts WHERE title ILIKE $1 OR content ILIKE $1 OR category ILIKE $1"
+		args = []any{"%" + term + "%"}
+	} else {
+		query = "SELECT * FROM posts"
+	}
+
+	rows, err := app.pool.Query(r.Context(), query, args...)
 	if err != nil {
 		handleInternalError(w, err)
 		return
