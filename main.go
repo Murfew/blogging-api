@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -16,13 +15,13 @@ import (
 )
 
 type Post struct {
-	ID        int       `json:"id"`
-	Title     string    `json:"title"`
-	Content   string    `json:"content"`
-	Category  string    `json:"category"`
-	Tags      []string  `json:"tags"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        int       `json:"id"         db:"id"`
+	Title     string    `json:"title"      db:"title"`
+	Content   string    `json:"content"    db:"content"`
+	Category  string    `json:"category"   db:"category"`
+	Tags      []string  `json:"tags"       db:"tags"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
 type Application struct {
@@ -33,13 +32,13 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-func validateRequestBody(w http.ResponseWriter, r *http.Request, post *Post) bool {
-	if err := json.NewDecoder(r.Body).Decode(&post); err != nil {
+func validateRequestBody(w http.ResponseWriter, r *http.Request, body *Post) bool {
+	if err := json.NewDecoder(r.Body).Decode(body); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body"})
 		return false
 	}
 
-	if post.Title == "" || post.Content == "" || post.Category == "" {
+	if body.Title == "" || body.Content == "" || body.Category == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "title, content and category are required"})
 		return false
 	}
@@ -47,26 +46,41 @@ func validateRequestBody(w http.ResponseWriter, r *http.Request, post *Post) boo
 	return true
 }
 
-func validateIdPathParam(w http.ResponseWriter, r *http.Request, id *int) bool {
+func validateIDPathParam(w http.ResponseWriter, r *http.Request, id *int) bool {
 	parsed, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("id must be of type int: %v", err)})
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "id must be an integer"})
 		return false
 	}
 	*id = parsed
 	return true
 }
 
+func handleInternalError(w http.ResponseWriter, err error) {
+	log.Printf("ERROR: %v", err)
+	writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "An unexpected error occurred. Please try again later."})
+}
+
+func handleNotFoundError(w http.ResponseWriter) {
+	writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "The requested post was not found."})
+}
+
 func (app *Application) handleCreatePost(w http.ResponseWriter, r *http.Request) {
-	var post Post
-	if !validateRequestBody(w, r, &post) {
+	var body Post
+	if !validateRequestBody(w, r, &body) {
 		return
 	}
 
-	query := "INSERT INTO posts (title, content, category, tags) VALUES ($1, $2, $3, $4) RETURNING id, created_at, updated_at"
-	err := app.pool.QueryRow(context.Background(), query, post.Title, post.Content, post.Category, post.Tags).Scan(&post.ID, &post.CreatedAt, &post.UpdatedAt)
+	query := "INSERT INTO posts (title, content, category, tags) VALUES ($1, $2, $3, $4) RETURNING id, title, content, category, tags, created_at, updated_at"
+	rows, err := app.pool.Query(r.Context(), query, body.Title, body.Content, body.Category, body.Tags)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to add post: %v", err)})
+		handleInternalError(w, err)
+		return
+	}
+
+	post, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[Post])
+	if err != nil {
+		handleInternalError(w, err)
 		return
 	}
 
@@ -75,39 +89,46 @@ func (app *Application) handleCreatePost(w http.ResponseWriter, r *http.Request)
 
 func (app *Application) handleUpdatePost(w http.ResponseWriter, r *http.Request) {
 	var id int
-	var newPost Post
-	if !validateRequestBody(w, r, &newPost) || !validateIdPathParam(w, r, &id) {
+	var body Post
+	if !validateRequestBody(w, r, &body) || !validateIDPathParam(w, r, &id) {
 		return
 	}
 
-	query := "UPDATE posts SET title = $1, content = $2, category = $3, tags = $4, updated_at = $5 WHERE id = $6 RETURNING id, created_at, updated_at"
-	err := app.pool.QueryRow(context.Background(), query, newPost.Title, newPost.Content, newPost.Category, newPost.Tags, time.Now(), id).Scan(&newPost.ID, &newPost.CreatedAt, &newPost.UpdatedAt)
+	query := "UPDATE posts SET title = $1, content = $2, category = $3, tags = $4, updated_at = NOW() WHERE id = $5 RETURNING id, title, content, category, tags, created_at, updated_at"
+	rows, err := app.pool.Query(r.Context(), query, body.Title, body.Content, body.Category, body.Tags, id)
+	if err != nil {
+		handleInternalError(w, err)
+		return
+	}
+
+	post, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[Post])
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("failed to find post with id %d", id)})
+		handleNotFoundError(w)
 		return
 	} else if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to update post (ID: %d): %v", id, err)})
+		handleInternalError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, newPost)
+	writeJSON(w, http.StatusOK, post)
 }
 
 func (app *Application) handleDeletePost(w http.ResponseWriter, r *http.Request) {
 	var id int
-	if !validateIdPathParam(w, r, &id) {
+	if !validateIDPathParam(w, r, &id) {
 		return
 	}
 
 	query := "DELETE FROM posts WHERE id = $1"
-	result, err := app.pool.Exec(context.Background(), query, id)
+	result, err := app.pool.Exec(r.Context(), query, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to delete post (ID: %d): %v", id, err)})
+		handleInternalError(w, err)
 		return
 	}
 
 	if result.RowsAffected() == 0 {
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("failed to find post with id %d", id)})
+		handleNotFoundError(w)
+		return
 	}
 
 	writeJSON(w, http.StatusNoContent, nil)
@@ -115,18 +136,23 @@ func (app *Application) handleDeletePost(w http.ResponseWriter, r *http.Request)
 
 func (app *Application) handleGetPost(w http.ResponseWriter, r *http.Request) {
 	var id int
-	if !validateIdPathParam(w, r, &id) {
+	if !validateIDPathParam(w, r, &id) {
 		return
 	}
 
-	var post Post
 	query := "SELECT * FROM posts WHERE id = $1"
-	err := app.pool.QueryRow(context.Background(), query, id).Scan(&post.ID, &post.Title, &post.Category, &post.Content, &post.Tags, &post.CreatedAt, &post.UpdatedAt)
+	rows, err := app.pool.Query(r.Context(), query, id)
+	if err != nil {
+		handleInternalError(w, err)
+		return
+	}
+
+	post, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[Post])
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("failed to find post with id %d", id)})
+		handleNotFoundError(w)
 		return
 	} else if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to get post (ID: %d): %v", id, err)})
+		handleInternalError(w, err)
 		return
 	}
 
@@ -135,41 +161,48 @@ func (app *Application) handleGetPost(w http.ResponseWriter, r *http.Request) {
 
 func (app *Application) handleGetPosts(w http.ResponseWriter, r *http.Request) {
 	query := "SELECT * FROM posts"
-	rows, err := app.pool.Query(context.Background(), query)
+	rows, err := app.pool.Query(r.Context(), query)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to get posts: %v", err)})
+		handleInternalError(w, err)
 		return
 	}
 
 	posts, err := pgx.CollectRows(rows, pgx.RowToStructByName[Post])
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to get posts: %v", err)})
+		handleInternalError(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, posts)
-
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
+	if data == nil {
+		w.WriteHeader(status)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+
+	err := json.NewEncoder(w).Encode(data)
+	if err != nil {
+		log.Printf("ERROR: %v", err)
+		return
+	}
 }
 
 func createPool() *pgxpool.Pool {
-	context := context.Background()
+	ctx := context.Background()
 	connStr := os.Getenv("DATABASE_URL")
 
-	pool, err := pgxpool.New(context, connStr)
+	pool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to create connection pool: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Unable to create connection pool: %v\n", err)
 	}
 
-	if err := pool.Ping(context); err != nil {
-		fmt.Fprintf(os.Stderr, "Ping failed: %v\n", err)
-		os.Exit(1)
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatalf("Ping failed: %v\n", err)
 	}
 
 	return pool
@@ -187,6 +220,6 @@ func main() {
 	mux.HandleFunc("GET /posts/{id}", app.handleGetPost)
 	mux.HandleFunc("GET /posts", app.handleGetPosts)
 
-	fmt.Println("Server is running at http://localhost:8080")
+	log.Print("Server is running at http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
