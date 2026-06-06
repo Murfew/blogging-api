@@ -133,6 +133,24 @@ func (app *Application) handleGetPost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, post)
 }
 
+func (app *Application) handleGetPosts(w http.ResponseWriter, r *http.Request) {
+	query := "SELECT * FROM posts"
+	rows, err := app.pool.Query(context.Background(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to get posts: %v", err)})
+		return
+	}
+
+	posts, err := pgx.CollectRows(rows, pgx.RowToStructByName[Post])
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to get posts: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, posts)
+
+}
+
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -167,6 +185,7 @@ func main() {
 	mux.HandleFunc("PUT /posts/{id}", app.handleUpdatePost)
 	mux.HandleFunc("DELETE /posts/{id}", app.handleDeletePost)
 	mux.HandleFunc("GET /posts/{id}", app.handleGetPost)
+	mux.HandleFunc("GET /posts", app.handleGetPosts)
 
 	fmt.Println("Server is running at http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
