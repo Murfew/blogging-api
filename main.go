@@ -86,7 +86,7 @@ func (app *Application) handleUpdatePost(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("failed to find post with id %d", id)})
 		return
 	} else if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to update post (ID: %d)", id)})
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to update post (ID: %d): %v", id, err)})
 		return
 	}
 
@@ -111,6 +111,26 @@ func (app *Application) handleDeletePost(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (app *Application) handleGetPost(w http.ResponseWriter, r *http.Request) {
+	var id int
+	if !validateIdPathParam(w, r, &id) {
+		return
+	}
+
+	var post Post
+	query := "SELECT * FROM posts WHERE id = $1"
+	err := app.pool.QueryRow(context.Background(), query, id).Scan(&post.ID, &post.Title, &post.Category, &post.Content, &post.Tags, &post.CreatedAt, &post.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("failed to find post with id %d", id)})
+		return
+	} else if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: fmt.Sprintf("failed to get post (ID: %d): %v", id, err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, post)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -146,8 +166,8 @@ func main() {
 	mux.HandleFunc("POST /posts", app.handleCreatePost)
 	mux.HandleFunc("PUT /posts/{id}", app.handleUpdatePost)
 	mux.HandleFunc("DELETE /posts/{id}", app.handleDeletePost)
+	mux.HandleFunc("GET /posts/{id}", app.handleGetPost)
 
 	fmt.Println("Server is running at http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
-
 }
